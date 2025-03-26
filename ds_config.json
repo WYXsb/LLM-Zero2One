@@ -1,0 +1,15 @@
+{
+    "train_batch_size": 256,
+    "fp16": {
+      "enabled": true,          // 启用混合精度
+      "loss_scale": 0,          // 动态损失缩放（自动处理下溢/上溢）
+      "initial_scale_power": 16 // 初始缩放因子为 2^16
+    },
+    "optimizer": {
+      "type": "AdamW",
+      "params": {
+        "lr": 1e-4,
+        "weight_decay": 0.01
+      }
+    }
+  }
