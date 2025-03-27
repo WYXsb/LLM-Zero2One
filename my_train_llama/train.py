@@ -6,12 +6,66 @@ import numpy as np
 from matplotlib import pyplot as plt
 import time
 import pandas as pd
-import urllib.request
-
-# 创建一个字典用于存储config
 MASTER_CONFIG = {
     # 参数放这里
 }
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+  
+    def _norm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # 这里对一个向量的所有维度计算平方和
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        return hidden_states * torch.rsqrt(variance + self.eps)
+  
+  
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.weight * self._norm(hidden_states.float()).type_as(hidden_states)
+
+
+class SimpleBrokenModel(nn.Module):
+    # init里的跟上面一样，没变化
+    def __init__(self, config=MASTER_CONFIG):
+      super().__init__()
+      self.config = config
+      self.rms = RMSNorm((config['context_window'], config['d_model']))
+      self.embedding = nn.Embedding(config['vocab_size'], config['d_model'])
+      self.linear = nn.Sequential(
+          nn.Linear(config['d_model'], config['d_model']),
+          nn.ReLU(),
+          nn.Linear(config['d_model'], config['vocab_size']),
+      )
+
+
+
+      # 添加前向传播函数
+    def forward(self, idx, targets=None):
+        # 实例化embedding层，输入映射为id的数据，输出嵌入后的数据
+        x = self.embedding(idx)
+        x = self.rms(x)
+        logits = self.linear(x)
+        
+
+        # 如果有目标值（也就是我们前面的y），则计算通过交叉熵损失计算loss结果。给输出的概率矩阵变个形状，再给目标值变个形状。  统一一下输入输出，然后计算loss。其中最后一维代表着一条数据。
+        # 此处需要了解tensor.view()函数，带上几何空间想象力去想一下矩阵的形状。
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, self.config['vocab_size']), targets.view(-1))
+            return logits, loss
+
+        # 如果没有目标值，则只返回概率分布的结果
+        else:
+            return logits
+
+        # 查看参数量
+        print("模型参数量：", sum([m.numel() for m in self.parameters()]))
+
+
+# 创建一个字典用于存储config
+
 def get_vocab(path):
     # 读数据
     lines = open(path, 'r').read()
@@ -46,8 +100,8 @@ def get_batches(data, split, batch_size, context_window, config=MASTER_CONFIG):
     # 这里需要学习torch.randint，生成大小为batch_size，内部数值为随机整数的tensor。生成随机数数值域为[0,训练集字符数量-滑动窗口大小-1]之间的整数
     # 详情可以参考官方文档，或者这个博客：https://blog.csdn.net/qq_41813454/article/details/136326473
     ix = torch.randint(0, batch_data.size(0) - context_window - 1, (batch_size,))
-    print('ix输出:')
-    print(ix)
+    # print('ix输出:')
+    # print(ix)
 
 
     # 这里需要学习torch.stack，执行操作类似于python的zip关键字，只不过操作对象是tensor张量，指定任意维度的张量进行组合
@@ -62,44 +116,7 @@ def get_batches(data, split, batch_size, context_window, config=MASTER_CONFIG):
     # 返回特征值，目标值
     return x, y
 
-# 在进行分析LlaMa架构分析之前，我们从最简单的文本生成模型开始创建，然后在最简单的文本生成模型的基础上，把LlaMa的RSM，Rope等一点点添加进去。为此我们先：
-# 创建一个有毛病的模型架构
-# 分析一下这个架构（其实也没什么分析的）
-class SimpleBrokenModel(nn.Module):
-    # init里的跟上面一样，没变化
-    def __init__(self, config=MASTER_CONFIG):
-      super().__init__()
-      self.config = config
-      self.embedding = nn.Embedding(config['vocab_size'], config['d_model'])
-      self.linear = nn.Sequential(
-          nn.Linear(config['d_model'], config['d_model']),
-          nn.ReLU(),
-          nn.Linear(config['d_model'], config['vocab_size']),
-      )
 
-
-
-      # 添加前向传播函数
-    def forward(self, idx, targets=None):
-        # 实例化embedding层，输入映射为id的数据，输出嵌入后的数据
-        x = self.embedding(idx)
-
-        logits = self.linear(x)
-        
-
-        # 如果有目标值（也就是我们前面的y），则计算通过交叉熵损失计算loss结果。给输出的概率矩阵变个形状，再给目标值变个形状。  统一一下输入输出，然后计算loss。其中最后一维代表着一条数据。
-        # 此处需要了解tensor.view()函数，带上几何空间想象力去想一下矩阵的形状。
-        if targets is not None:
-
-            loss = F.cross_entropy(logits.view(-1, self.config['vocab_size']), targets.view(-1))
-            return logits, loss
-
-        # 如果没有目标值，则只返回概率分布的结果
-        else:
-            return logits
-
-        # 查看参数量
-        print("模型参数量：", sum([m.numel() for m in self.parameters()]))
 
 @torch.no_grad()
 def evaluate_loss(model, config=MASTER_CONFIG):
@@ -188,6 +205,8 @@ def train(model, optimizer, scheduler=None, config=MASTER_CONFIG, print_logs=Fal
     return pd.DataFrame(losses).plot()
 
 
+
+
 if __name__ == "__main__":
     
     # 查看词表前n个字符
@@ -222,20 +241,20 @@ if __name__ == "__main__":
     # # 因为是随机生成的采样，我们可以看一下数据，其中每个采样数据，来自于原文随机的起始点，每个元组为一个（x,y），可以观察每个x和y的首位去直观感受一下滑动窗口执行的操作
     decoded_samples = [(decode(itos,xs[i].tolist()), decode(itos,ys[i].tolist())) for i in range(len(xs))]
     
-    # MASTER_CONFIG.update({
-    #     'd_model': 128,
-    # })
-    # MASTER_CONFIG.update({
-    #     'epochs': 1000,
-    #     'log_interval': 10,      # 每10个batch打印一次log
-    #     'batch_size': 32,
-    # })
-    # model = SimpleBrokenModel(MASTER_CONFIG)
-    # print("咱们的模型这么多参数量:", sum([m.numel() for m in model.parameters()]))
-    # optimizer = torch.optim.Adam(
-    #     model.parameters(),      # 优化器执行优化全部的模型参数
-    # )
+    MASTER_CONFIG.update({
+        'd_model': 128,
+    })
+    MASTER_CONFIG.update({
+        'epochs': 1000,
+        'log_interval': 10,      # 每10个batch打印一次log
+        'batch_size': 32,
+    })
+    model = SimpleBrokenModel(MASTER_CONFIG)
+    print("咱们的模型这么多参数量:", sum([m.numel() for m in model.parameters()]))
+    optimizer = torch.optim.Adam(
+        model.parameters(),      # 优化器执行优化全部的模型参数
+    )
     
 
-    # # 启动训练
-    # train(model, optimizer,print_logs=True)
+    # 启动训练
+    train(model, optimizer,print_logs=True)
